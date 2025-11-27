@@ -1,135 +1,462 @@
-"""
-wumpus_world.py
+import pygame
+import json
+import random
+import sys
+from collections import deque
 
-Competition-ready A* implementation for a grid-based Wumpus world.
-Class: WumpusWorld
-Method expected by validator: search()
 
-- Grid representation:
-    0 -> free cell
-    1 -> obstacle / hazard (impassable)
-- start, goal: (row, col) or list-like [row, col]
+# Initialize Pygame
+pygame.init()
 
-Behavior:
-- If start==goal and start is valid, returns [start].
-- If no path exists, returns None.
-- Never raises an exception for normal/malformed inputs; returns None if inputs invalid.
-"""
+# Constants
+GRID_ROWS = 5
+GRID_COLS = 10
+CELL_SIZE = 80
+WINDOW_WIDTH = GRID_COLS * CELL_SIZE
+WINDOW_HEIGHT = GRID_ROWS * CELL_SIZE + 100
+FPS = 60
 
-import heapq
-from typing import List, Tuple, Optional
+# Colors
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+GRAY = (200, 200, 200)
+RED = (255, 0, 0)
+GREEN = (0, 255, 0)
+YELLOW = (255, 255, 0)
+BLUE = (0, 0, 255)
+ORANGE = (255, 165, 0)
+BROWN = (139, 69, 19)
 
-Coord = Tuple[int, int]
+# Load team configuration
+def load_config():
+    try:
+        with open('team_config.json', 'r') as f:
+            config = json.load(f)
+        return config
+    except FileNotFoundError:
+        print("Error: team_config.json not found!")
+        sys.exit(1)
 
-class WumpusWorld:
-    def __init__(self, grid: List[List[int]], start, goal):
-        # Normalize types and perform validation but do not raise - return None later in search if invalid
-        self.grid = grid if isinstance(grid, list) and grid else []
-        self.start = tuple(start) if (isinstance(start, (list, tuple)) and len(start) == 2) else None
-        self.goal = tuple(goal) if (isinstance(goal, (list, tuple)) and len(goal) == 2) else None
+# World class
+class BangaloreWumpusWorld:
+    def __init__(self, config):
+        self.config = config
+        self.seed = config['seed']
+        random.seed(self.seed)
 
-        # Dimensions (safe fallback)
-        self.rows = len(self.grid)
-        self.cols = len(self.grid[0]) if self.rows > 0 and isinstance(self.grid[0], list) else 0
+        # Initialize grid
+        self.grid = [[{'type': 'empty', 'percepts': [], 'weight': random.randint(1,15)}
+              for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
 
-    def heuristic(self, a: Coord, b: Coord) -> int:
-        # Manhattan distance
-        return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
-    def in_bounds(self, node: Coord) -> bool:
-        r, c = node
-        return 0 <= r < self.rows and 0 <= c < self.cols
+        # Agent starts at bottom-left diagonal
+        self.agent_start = (0, GRID_ROWS - 1)
+        self.agent_pos = list(self.agent_start)
+        self.agent_path = []
 
-    def is_free(self, node: Coord) -> bool:
-        # Treat anything not exactly 1 as free (defensive)
-        r, c = node
-        try:
-            return self.grid[r][c] != 1
-        except Exception:
-            return False
+        # Game state
+        self.game_over = False
+        self.game_won = False
+        self.message = ""
 
-    def get_neighbors(self, node: Coord) -> List[Coord]:
-        # 4-connected grid
-        r, c = node
-        candidates = [(r+1,c), (r-1,c), (r,c+1), (r,c-1)]
+        # Generate world
+        self._generate_world()
+
+    def _generate_world(self):
+        """Generate random world elements based on config"""
+        num_traffic_lights = self.config['grid_config']['traffic_lights']
+        num_cows = self.config['grid_config']['cows']
+        num_pits = self.config['grid_config']['pits']
+
+        # Generate available positions (exclude agent start)
+        available_positions = [(x, y) for x in range(GRID_COLS) for y in range(GRID_ROWS)
+                               if (x, y) != tuple(self.agent_start)]
+
+        random.shuffle(available_positions)
+
+        # Place traffic lights
+        for i in range(num_traffic_lights):
+            if available_positions:
+                pos = available_positions.pop()
+                self.grid[pos[1]][pos[0]]['type'] = 'traffic_light'
+
+        # Place cows
+        for i in range(num_cows):
+            if available_positions:
+                pos = available_positions.pop()
+                self.grid[pos[1]][pos[0]]['type'] = 'cow'
+
+        # Place pits
+        for i in range(num_pits):
+            if available_positions:
+                pos = available_positions.pop()
+                self.grid[pos[1]][pos[0]]['type'] = 'pit'
+
+        # Place goal
+        if available_positions:
+            goal_pos = available_positions.pop()
+            self.grid[goal_pos[1]][goal_pos[0]]['type'] = 'goal'
+            self.goal_pos = goal_pos
+
+        # Generate percepts
+        self._generate_percepts()
+
+    def _generate_percepts(self):
+        """Generate percepts for all cells based on adjacent elements"""
+        for y in range(GRID_ROWS):
+            for x in range(GRID_COLS):
+                neighbors = self._get_neighbors(x, y)
+
+                for nx, ny in neighbors:
+                    cell_type = self.grid[ny][nx]['type']
+
+                    if cell_type == 'pit':
+                        if 'breeze' not in self.grid[y][x]['percepts']:
+                            self.grid[y][x]['percepts'].append('breeze')
+
+                    elif cell_type == 'cow':
+                        if 'moo' not in self.grid[y][x]['percepts']:
+                            self.grid[y][x]['percepts'].append('moo')
+
+                    elif cell_type == 'traffic_light':
+                        if 'light' not in self.grid[y][x]['percepts']:
+                            self.grid[y][x]['percepts'].append('light')
+
+    def _get_neighbors(self, x, y):
+        """Get valid adjacent neighbors (no diagonals - up, down, left, right only)"""
         neighbors = []
-        for n in candidates:
-            if self.in_bounds(n) and self.is_free(n):
-                neighbors.append(n)
+        directions = [(0, -1), (0, 1), (-1, 0), (1, 0)]  # Up, Down, Left, Right
+
+        for dx, dy in directions:
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < GRID_COLS and 0 <= ny < GRID_ROWS:
+                neighbors.append((nx, ny))
+
         return neighbors
 
-    def reconstruct(self, came_from: dict, end: Coord) -> List[Coord]:
-        path = []
-        node = end
-        while node is not None:
-            path.append(node)
-            node = came_from.get(node)
-        path.reverse()
-        return path
+    def move_agent(self, new_x, new_y):
+        """Move agent to new position and handle interactions"""
+        if self.game_over or self.game_won:
+            return
 
-    # Public method expected by validator
-    def search(self) -> Optional[List[Coord]]:
-        # Validate grid presence
-        if self.rows == 0 or self.cols == 0:
-            # invalid grid
-            return None
+        # Check bounds
+        if not (0 <= new_x < GRID_COLS and 0 <= new_y < GRID_ROWS):
+            return
 
-        # Validate start/goal
-        if self.start is None or self.goal is None:
-            return None
-        if not (self.in_bounds(self.start) and self.in_bounds(self.goal)):
-            return None
+        # Only allow orthogonal movement (no diagonals)
+        dx = abs(new_x - self.agent_pos[0])
+        dy = abs(new_y - self.agent_pos[1])
+        if dx + dy != 1:
+            return
 
-        # Make sure start and goal are free cells
-        if not self.is_free(self.start) or not self.is_free(self.goal):
-            return None
+        self.agent_pos = [new_x, new_y]
+        self.agent_path.append((new_x, new_y))
 
-        # Trivial case
-        if self.start == self.goal:
-            return [self.start]
+        cell_type = self.grid[new_y][new_x]['type']
 
-        # A* initialization
-        open_heap = []
-        heapq.heappush(open_heap, (0 + self.heuristic(self.start, self.goal), 0, self.start))
-        came_from = { self.start: None }
-        g_score = { self.start: 0 }
-        closed = set()
+        # Handle traffic light - simulate delay
+        if cell_type == 'traffic_light':
+            self.message = "Waiting at traffic signal..."
+            self._simulate_traffic_delay()
 
-        while open_heap:
-            f, g, current = heapq.heappop(open_heap)
+        # Handle cow - reset to start
+        elif cell_type == 'cow':
+            self.message = "Moo! Cow encountered - returning to start!"
+            self.agent_pos = list(self.agent_start)
+            self.agent_path = []
+            # TODO: Students need to handle this in their A* implementation
+            # When cow is hit, pathfinding must restart from beginning
 
-            # If we've already processed this node with a better g, skip
-            if g_score.get(current, float('inf')) < g:
-                continue
+        # Handle pit - game over
+        elif cell_type == 'pit':
+            self.message = "Game Over - Fell into a pit!"
+            self.game_over = True
 
-            if current == self.goal:
-                return self.reconstruct(came_from, current)
+        # Handle goal - win
+        elif cell_type == 'goal':
+            self.message = "Goal Reached! You won!"
+            self.game_won = True
 
-            closed.add(current)
+    def _simulate_traffic_delay(self):
+        """Simulate traffic light delay using nested loop"""
+        # This creates a time delay without using time.sleep
+        delay = 0
+        for i in range(1000):
+            for j in range(10000):
+                delay += 1
 
-            for nb in self.get_neighbors(current):
-                if nb in closed:
+    def get_current_percepts(self):
+        """Get percepts at current agent position"""
+        x, y = self.agent_pos
+        return self.grid[y][x]['percepts']
+
+    # TODO: Students must implement A* pathfinding
+    def find_path_astar(self):
+        """
+        TODO: Implement A* pathfinding algorithm here
+
+        Requirements:
+        1. Find path from current agent position to goal
+        2. Movement: Only up, down, left, right (NO diagonals)
+        3. Handle obstacles:
+           - Pits: Must avoid completely (game over if entered)
+           - Traffic lights: Can pass through but have higher cost (simulate wait)
+           - Cows: Must handle collision - if agent hits cow, it resets to start
+                   Your A* needs to account for this (hint: you might need replanning)
+
+        4. Return path as list of (x, y) tuples
+        5. If no path exists, return None and set self.message = "Path Not Found"
+
+        Hints:
+        - Use manhattan distance as heuristic
+        - Traffic light cells should have cost > 1 (recommend cost = 5)
+        - Cow cells: Either avoid them OR handle reset in your logic
+        - Use self._get_neighbors(x, y) to get valid adjacent cells
+        - Remember: only orthogonal movement allowed!
+
+        Algorithm structure:
+        - Priority queue (use heapq or implement your own)
+        - Track: f_score, g_score, came_from
+        - f(n) = g(n) + h(n)
+        - g(n) = cost from start to n
+        - h(n) = heuristic (manhattan distance to goal)
+
+        Example return:
+        return [(0, 4), (1, 4), (2, 4), (2, 3), ...]  # List of coordinates
+        """
+        import heapq
+
+        start = tuple(self.agent_pos)
+        goal = self.goal_pos
+        
+        # Priority queue for A*: (f_score, current_node)
+        open_set = []
+        heapq.heappush(open_set, (0, start))
+        
+        # Came from map to reconstruct path
+        came_from = {}
+        
+        # g_score: cost from start to node
+        g_score = {start: 0}
+        
+        # f_score: g_score + heuristic
+        f_score = {start: self._heuristic(start, goal)}
+        
+        while open_set:
+            current = heapq.heappop(open_set)[1]
+            
+            if current == goal:
+                return self._reconstruct_path(came_from, current)
+            
+            for neighbor in self._get_neighbors(current[0], current[1]):
+                # Calculate tentative g_score
+                cost = self._get_cell_cost(neighbor)
+                
+                # If cost is infinite (pit or cow), skip
+                if cost == float('inf'):
                     continue
-
-                tentative_g = g_score[current] + 1
-
-                if tentative_g < g_score.get(nb, float('inf')):
-                    came_from[nb] = current
-                    g_score[nb] = tentative_g
-                    f_score = tentative_g + self.heuristic(nb, self.goal)
-                    heapq.heappush(open_heap, (f_score, tentative_g, nb))
-
-        # No path found
+                    
+                tentative_g_score = g_score[current] + cost
+                
+                if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
+                    came_from[neighbor] = current
+                    g_score[neighbor] = tentative_g_score
+                    f_score[neighbor] = tentative_g_score + self._heuristic(neighbor, goal)
+                    heapq.heappush(open_set, (f_score[neighbor], neighbor))
+                    
+        self.message = "Path Not Found"
         return None
 
+    def _heuristic(self, pos, goal):
+        """Manhattan distance heuristic"""
+        return abs(pos[0] - goal[0]) + abs(pos[1] - goal[1])
 
-# If someone runs this file directly, show a tiny self-test (safe)
+    def _get_cell_cost(self, pos):
+        """Get cost of entering a cell"""
+        x, y = pos
+        cell_type = self.grid[y][x]['type']
+        
+        if cell_type == 'pit':
+            return float('inf')
+        elif cell_type == 'cow':
+            return float('inf') # Avoid cows to prevent reset
+        elif cell_type == 'traffic_light':
+            return 20
+        else:
+            return self.grid[y][x]['weight']
+
+    def _reconstruct_path(self, came_from, current):
+        """Reconstruct path from came_from map"""
+        total_path = [current]
+        while current in came_from:
+            current = came_from[current]
+            total_path.append(current)
+        
+        # Reverse path to get start -> goal
+        # Exclude start position as per typical pathfinding return (or include? 
+        # The example says [(0, 4), (1, 4)...] which includes start if it moves immediately?
+        # Actually example: [(0, 4), (1, 4)...] where (0,4) is start.
+        # Let's include everything but reverse it.
+        return total_path[::-1]
+
+    def execute_path(self, path):
+        """Execute a computed path step by step"""
+        if path is None:
+            return
+
+        for x, y in path:
+            self.move_agent(x, y)
+            if self.game_over or self.game_won:
+                break
+
+# Pygame rendering
+class GameRenderer:
+    def __init__(self, world):
+        self.world = world
+        self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+        pygame.display.set_caption("Bangalore Wumpus World - AI CODEFIX 2025")
+        self.clock = pygame.time.Clock()
+        self.font = pygame.font.Font(None, 24)
+        self.small_font = pygame.font.Font(None, 18)
+
+    def draw_grid(self):
+        """Draw the grid lines"""
+        for x in range(0, WINDOW_WIDTH, CELL_SIZE):
+            pygame.draw.line(self.screen, BLACK, (x, 0), (x, WINDOW_HEIGHT - 100), 2)
+        for y in range(0, WINDOW_HEIGHT - 100, CELL_SIZE):
+            pygame.draw.line(self.screen, BLACK, (0, y), (WINDOW_WIDTH, y), 2)
+
+    def draw_cell_contents(self):
+        """Draw contents of each cell"""
+        for y in range(GRID_ROWS):
+            for x in range(GRID_COLS):
+                cell = self.world.grid[y][x]
+                px = x * CELL_SIZE
+                py = y * CELL_SIZE
+
+                # Draw cell type
+                if cell['type'] == 'traffic_light':
+                    pygame.draw.circle(self.screen, RED, (px + CELL_SIZE//2, py + CELL_SIZE//2), 20)
+                    text = self.small_font.render("SIGNAL", True, WHITE)
+                    self.screen.blit(text, (px + 15, py + 55))
+
+                elif cell['type'] == 'cow':
+                    pygame.draw.rect(self.screen, BROWN, (px + 20, py + 20, 40, 40))
+                    text = self.small_font.render("COW", True, WHITE)
+                    self.screen.blit(text, (px + 25, py + 30))
+
+                elif cell['type'] == 'pit':
+                    pygame.draw.circle(self.screen, BLACK, (px + CELL_SIZE//2, py + CELL_SIZE//2), 25)
+                    text = self.small_font.render("PIT", True, WHITE)
+                    self.screen.blit(text, (px + 28, py + 30))
+
+                elif cell['type'] == 'goal':
+                    pygame.draw.rect(self.screen, GREEN, (px + 15, py + 15, 50, 50))
+                    text = self.small_font.render("GOAL", True, BLACK)
+                    self.screen.blit(text, (px + 20, py + 30))
+
+                # Draw percepts (small indicators)
+                percept_y_offset = 10
+                if 'breeze' in cell['percepts']:
+                    text = self.small_font.render("~", True, BLUE)
+                    self.screen.blit(text, (px + 5, py + percept_y_offset))
+                    percept_y_offset += 15
+
+                if 'moo' in cell['percepts']:
+                    text = self.small_font.render("M", True, BROWN)
+                    self.screen.blit(text, (px + 5, py + percept_y_offset))
+                    percept_y_offset += 15
+
+                if 'light' in cell['percepts']:
+                    text = self.small_font.render("L", True, ORANGE)
+                    self.screen.blit(text, (px + 5, py + percept_y_offset))
+
+    def draw_agent(self):
+        """Draw the agent"""
+        x, y = self.world.agent_pos
+        px = x * CELL_SIZE + CELL_SIZE // 2
+        py = y * CELL_SIZE + CELL_SIZE // 2
+        pygame.draw.circle(self.screen, YELLOW, (px, py), 15)
+        pygame.draw.circle(self.screen, BLACK, (px, py), 15, 2)
+
+        # Draw eyes
+        pygame.draw.circle(self.screen, BLACK, (px - 5, py - 3), 3)
+        pygame.draw.circle(self.screen, BLACK, (px + 5, py - 3), 3)
+
+    def draw_info(self):
+        """Draw info panel at bottom"""
+        info_y = WINDOW_HEIGHT - 100
+        pygame.draw.rect(self.screen, GRAY, (0, info_y, WINDOW_WIDTH, 100))
+
+        # Current position
+        pos_text = self.font.render(f"Position: {self.world.agent_pos}", True, BLACK)
+        self.screen.blit(pos_text, (10, info_y + 10))
+
+        # Percepts
+        percepts = self.world.get_current_percepts()
+        percept_text = self.font.render(f"Percepts: {', '.join(percepts) if percepts else 'None'}", True, BLACK)
+        self.screen.blit(percept_text, (10, info_y + 35))
+
+        # Message
+        msg_text = self.font.render(self.world.message, True, RED if self.world.game_over else GREEN)
+        self.screen.blit(msg_text, (10, info_y + 60))
+
+    def render(self):
+        """Main render function"""
+        self.screen.fill(WHITE)
+        self.draw_grid()
+        self.draw_cell_contents()
+        self.draw_agent()
+        self.draw_info()
+        pygame.display.flip()
+        self.clock.tick(FPS)
+
+# Main game loop
+def main():
+    config = load_config()
+    world = BangaloreWumpusWorld(config)
+    renderer = GameRenderer(world)
+
+    print("=== Bangalore Wumpus World ===")
+    print(f"Team ID: {config['team_id']}")
+    print(f"Agent Start: {world.agent_start}")
+    print(f"Goal Position: {world.goal_pos}")
+    print("\nControls:")
+    print("- Arrow keys: Manual movement")
+    print("- SPACE: Execute A* pathfinding (when implemented)")
+    print("- R: Reset world")
+    print("- ESC: Quit")
+
+    running = True
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    running = False
+
+                elif event.key == pygame.K_r:
+                    # Reset world
+                    world = BangaloreWumpusWorld(config)
+                    renderer.world = world
+
+                elif event.key == pygame.K_SPACE:
+                    # TODO: Call A* pathfinding when implemented
+                    print("\n=== Executing A* Pathfinding ===")
+                    path = world.find_path_astar()
+                    if path:
+                        print(f"Path found: {path}")
+                        world.execute_path(path)
+                    else:
+                        print("Path not found or A* not implemented yet")
+
+                
+
+        renderer.render()
+
+    pygame.quit()
+
 if __name__ == "__main__":
-    simple_grid = [
-        [0,0,0],
-        [0,1,0],
-        [0,0,0]
-    ]
-    ww = WumpusWorld(simple_grid, (0,0), (2,2))
-    p = ww.search()
-    print("Self-test path:", p)
+    main()
