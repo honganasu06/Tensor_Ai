@@ -1,0 +1,51 @@
+{
+  "cases": [
+    {
+      "name": "Simple Clear Grid",
+      "grid": [
+        [0, 0, 0],
+        [0, 0, 0],
+        [0, 0, 0]
+      ],
+      "start": [0, 0],
+      "goal": [2, 2],
+      "expected": true
+    },
+    {
+      "name": "Obstacles in Middle",
+      "grid": [
+        [0, 1, 0, 0],
+        [0, 1, 0, 1],
+        [0, 0, 0, 0],
+        [1, 1, 0, 0]
+      ],
+      "start": [0, 0],
+      "goal": [3, 3],
+      "expected": true
+    },
+    {
+      "name": "Blocked Path",
+      "grid": [
+        [0, 1, 1],
+        [1, 1, 1],
+        [1, 1, 0]
+      ],
+      "start": [0, 0],
+      "goal": [2, 2],
+      "expected": false
+    },
+    {
+      "name": "Multiple Hazards",
+      "grid": [
+        [0, 0, 1, 0, 0],
+        [1, 0, 1, 0, 1],
+        [0, 0, 0, 0, 0],
+        [0, 1, 1, 1, 0],
+        [0, 0, 0, 0, 0]
+      ],
+      "start": [0, 0],
+      "goal": [4, 4],
+      "expected": true
+    }
+  ]
+}
