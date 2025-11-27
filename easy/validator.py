@@ -19,9 +19,15 @@ from wumpus_world import WumpusWorld
 
 Coord = Tuple[int, int]
 
+import os
+
 def load_tests(path="test_cases.json"):
+    # Resolve path relative to script location
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    full_path = os.path.join(base_dir, path)
+    
     try:
-        with open(path, "r") as f:
+        with open(full_path, "r") as f:
             data = json.load(f)
         if not isinstance(data, dict) or "cases" not in data:
             print("ERROR: test_cases.json must contain a top-level 'cases' list.")
